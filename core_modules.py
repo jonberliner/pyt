@@ -59,20 +59,24 @@ class ReadInReadOutModule(SizedModule):
 
 class Swish(SizedModule):
     def __init__(self, dim_input=None, trainable=False):
-        super().__init__()
+        super().__init__(dim_input)
+        self.trainable = trainable
 
+        _dim_input = dim_input or 1
+        _beta_logit = torch.ones(_dim_input) * 0.5412  # softplus ~= 1.
         if trainable:
             assert self.dim_input is not None
-            self.beta = F.softplus(Variable(torch.ones(self.dim_input)))
+            self.beta_logit = nn.Parameter(_beta_logit,
+                                           requires_grad=True)
         else:
-            self.beta = torch.FloatTensor([1.])
-
-        if cuda:
-            self.beta = self.beta.cuda()
+            self.register_buffer('beta_logit', _beta_logit)
 
     def forward(self, xs):
-        return xs * F.sigmoid(self.beta.astype(xs) * xs)
-
+        beta_logit = self.beta_logit
+        if not self.trainable:
+            beta_logit = Variable(beta_logit)
+        beta = F.softplus(beta_logit)
+        return xs * F.sigmoid(beta * xs)
 
 
 class Identity(nn.Module):

@@ -1,8 +1,11 @@
 import torch
 from torch import nn
 from torch.autograd import Variable
+from torchvision.datasets import MNIST
+import os
 
 CUDA = torch.cuda.is_available()
+
 
 def cuda_if_available(tensor):
     tensor = tensor.cuda() if CUDA else tensor
