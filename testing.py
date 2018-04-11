@@ -150,7 +150,7 @@ def _transform_mnist_builder(flatten, channel_dim):
     toTensor = ToTensor()
     def fn(image):
         shape = [784] if flatten else [28, 28]
-        if channel_dim: shape = [0] + shape
+        if channel_dim: shape = [1] + shape
         return toTensor(image).view(shape).float()
     return fn
 
