@@ -5,10 +5,11 @@ from torch.autograd import Variable
 
 from pyt.dropout import GaussianDropout
 from pyt.normalization import GroupNorm
+from pyt.util import CUDA, var_to_numpy
+
+import numpy as np
 
 import os
-
-cuda = torch.cuda.is_available()
 
 
 class SizedModule(nn.Module):
@@ -116,24 +117,33 @@ class MLP(SizedModule):
         self.dropout_kind = dropout_kind
         self.drop_fn = drop_fns[str(dropout_kind)]
 
-        _module_list = list()
+        # _module_list = list()
+        _linears = list()
+        _normeds = list()
+        _droppeds = list()
         dim_in = dim_input
         for hi, dim_out in enumerate(dim_hidden):
             linear = nn.Linear(dim_in, dim_out)
             normed = self.norm_fn(dim_out)
             dropped = self.drop_fn(self.p_drop)
 
-            _module_list += [linear, normed, dropped]
+            _linears.append(linear)
+            _normeds.append(normed)
+            _droppeds.append(dropped)
+
             dim_in = dim_out
         nlayer = len(dim_hidden) + 1
-        linear = nn.Linear(dim_in, dim_output)
-        _module_list.append(linear)
-        self.module_list = nn.ModuleList(_module_list)
+        self.readout = nn.Linear(dim_in, dim_output)
+
+        self.linear = nn.ModuleList(_linears)
+        self.normed = nn.ModuleList(_normeds)
+        self.dropped = nn.ModuleList(_droppeds)
 
     def forward(self, xs):
         output = xs
-        for layer in self.module_list:
-            output = layer(output)
+        for lin, norm, drop in zip(self.linear, self.normed, self.dropped):
+            output = drop(norm(self.act_fn(lin(output))))
+        output = self.readout(output)
         return output
 
 
@@ -156,7 +166,7 @@ if __name__ == '__main__':
     from torch.optim import Adam
 
 
-    DATA_DIR = '/Users/jsb/data/mnist/'
+    DATA_DIR = '/home/j.s.berliner/mnist/'
     os.makedirs(DATA_DIR, exist_ok=True)
 
     toTensor = transforms.ToTensor()
@@ -167,7 +177,7 @@ if __name__ == '__main__':
         return out
 
     dataset = MNIST(DATA_DIR, 
-                    download=False, 
+                    download=True, 
                     transform=transform_mnist,
                     train=True)
     data_loader = DataLoader(dataset, 
@@ -182,17 +192,18 @@ if __name__ == '__main__':
                                   batch_size=64, 
                                   shuffle=False)
 
-    # # %%
-    # xs = Variable(data.train_data[:10]).float().mul(1./255.).view(-1, 784)
     model = SNMLP(784, 10, [128]*5)
+    if torch.cuda.is_available():
+        model = model.cuda()
     opt = Adam(model.parameters(), lr=1e-3, weight_decay=1e-3)
-    # ys = model(xs)
 
     cel = nn.CrossEntropyLoss()
 
     def step(xs, ys, i_step=None):
         xs = Variable(xs, requires_grad=False)
         ys = Variable(ys, requires_grad=False)
+        if CUDA:
+            xs, ys = xs.cuda(), ys.cuda()
 
         model.train()
         opt.zero_grad()
@@ -201,9 +212,9 @@ if __name__ == '__main__':
 
         loss.backward()
         opt.step()
-        loss = loss.data.numpy()[0]
+        loss = var_to_numpy(loss)[0]
         if i_step is not None:
-            print(f'(step {i_step}) loss: {loss}', end='\r')
+            print('(step {:d}) loss: {:.3f}'.format(i_step, loss), end='\r')
 
     def evaluate(data_loader, split, i_step):
         nsam = 0
@@ -215,27 +226,27 @@ if __name__ == '__main__':
 
             xs = Variable(xs, requires_grad=False)
             ys = Variable(ys, requires_grad=False)
+            if CUDA:
+                xs, ys = xs.cuda(), ys.cuda()
 
             yhl = model(xs)
-            loss = cel(yhl, ys).data.numpy()[0]
+            loss = var_to_numpy(cel(yhl, ys))
 
             _, yh = yhl.max(1)
-            acc = np.mean(yh.data.numpy() == ys)
+            acc = np.mean(var_to_numpy(yh == ys))
 
             losses.append(loss)
             accs.append(acc)
 
         loss = np.mean(losses)
         acc = np.mean(accs)
-        print(f'({split} step {i_step}) acc: {acc}, loss: {loss}')
+        print('({:s} step {:d}) acc: {:.3f}, loss: {:.3f}'\
+               .format(split, i_step, acc, loss))
 
     i_step = 0
-    for i_epoch in range(N_EPOCH):
+    for i_epoch in range(10):
+        evaluate(data_loader, 'train', i_step)
+        evaluate(test_data_loader, 'test', i_step)
         for xs, ys in data_loader:
             step(xs, ys, i_step=i_step)
             i_step += 1
-
-        # indices = np.random.choice(50000, 1000, replace=False)
-        # xs = dataset.train_data.in
-
-
