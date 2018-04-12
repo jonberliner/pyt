@@ -1,7 +1,6 @@
 import torch
 from torch import nn
 from torch.autograd import Variable
-from torchvision.datasets import MNIST
 import os
 
 CUDA = torch.cuda.is_available()
