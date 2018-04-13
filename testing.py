@@ -14,16 +14,16 @@ from pyt.util import CUDA, var_to_numpy
 TASK_LOSS_FNS = {'autoencode': nn.BCEWithLogitsLoss,
                  'classify': nn.CrossEntropyLoss,
                  'regress': nn.MSELoss}
+
 TASKS = list(TASK_LOSS_FNS.keys())
 
 
 def test_over_mnist(model, 
                     data_dir, 
                     task, 
-                    flatten, 
-                    channel_dim, 
                     training_kwargs={},
-                    custom_pen=None):
+                    transform=ToTensor(),
+                    training_penalty=None):
     """quickly train a model over mnist
     Args:
         model (nn.Module): pytorch model to optimize
@@ -39,11 +39,11 @@ def test_over_mnist(model,
     batch_size = training_kwargs.get('batch_size', 64)
     lr = training_kwargs.get('lr', 1e-3)
     weight_decay = training_kwargs.get('weight_decay', 0.)
-    # for testing over small data
+    # TODO: for testing over small data
     # n_train = training_kwargs.get('n_train', -1)
     # n_test = training_kwargs.get('n_test', -1)
 
-    datasets = quick_mnist(data_dir, flatten, channel_dim)
+    datasets = quick_mnist(data_dir, transform=transform)
     train_data_loader = DataLoader(datasets['train'], 
                                    batch_size=batch_size, 
                                    shuffle=True)
@@ -77,8 +77,8 @@ def test_over_mnist(model,
         loss = loss_fn(yhl, ys)
 
         train_loss = loss
-        if custom_pen:
-            pen = custom_pen(model=model, inputs=xs, outputs=yhl)
+        if training_penalty:
+            pen = training_penalty(model=model, inputs=xs, outputs=yhl)
             train_loss = train_loss + pen
 
         train_loss.backward()
@@ -129,10 +129,19 @@ def test_over_mnist(model,
             i_step += 1
 
 
-def quick_mnist(data_dir, flatten=False, channel_dim=False):
-    os.makedirs(data_dir, exist_ok=True)
+def _flatten(im):
+    return im.view(-1)
 
-    transform = _transform_mnist_builder(flatten, channel_dim)
+
+def _channel_dim(im):
+    return im.unsqueeze(0)
+
+
+# TODO (maybe): add a few common transforms as string options
+# QUICK_TRANSFORMS = {'flatten': _flatten, 'channel_dim': channel_dim}
+
+def quick_mnist(data_dir, transform=ToTensor()):
+    os.makedirs(data_dir, exist_ok=True)
     download = not (os.path.exists(os.path.join(data_dir, 'processed', 'training.pt'))
                     and os.path.exists(os.path.join(data_dir, 'processed', 'test.pt')))
     dataset = MNIST(data_dir, 
@@ -144,15 +153,6 @@ def quick_mnist(data_dir, flatten=False, channel_dim=False):
                          transform=transform, 
                          train=False)
     return {'train': dataset, 'test': test_dataset}
-
-
-def _transform_mnist_builder(flatten, channel_dim):
-    toTensor = ToTensor()
-    def fn(image):
-        shape = [784] if flatten else [28, 28]
-        if channel_dim: shape = [1] + shape
-        return toTensor(image).view(shape).float()
-    return fn
 
 
 if __name__ == '__main__':
@@ -169,18 +169,22 @@ if __name__ == '__main__':
     # build mnist-compatible model
     model = MLP(784, 10, [128]*3, act_fn=Swish())
 
+    # what are we testing? (currently supports 'classify' and 'autoencode')
+    task = 'classify'
+
     # training kwargs has opt and batching kwargs in it atm 
     # TODO: should these be separated?
     training_kwargs = {'lr': 1e-3, 
-                       'weight_decay': 1e-4, 
+                       'weight_decay': 1e-4,
                        'n_epoch': 6}
 
-    # specify how to shape the mnsit data to be compatible w the model
-    flatten = True
-    channel_dim = False
 
-    # what are we testing?
-    task = 'classify'
+    # EXAMPLE OF PASSING CUSTOM DATA TRANSFORM
+    # how would we like to transform the data for our model?
+    # NOTE: not using lambdas so we can serialize
+    toTensor = ToTensor()
+    def custom_transform(pil_image):
+        return toTensor(pil_image).view(-1).float()
 
 
     # EXAMPLE OF QUICKLY ADDING A CUSTOM PENALTY.
@@ -190,7 +194,8 @@ if __name__ == '__main__':
     # during training
     def custom_l1_act_penalty(model: nn.Module,\
                               inputs: Variable,
-                              outputs: Variable=None)\
+                              outputs: Variable=None,
+                              weight: float=1.)\
                              -> Variable:
         """add sparisty penalty to all hidden activations"""
         pen = Variable(torch.zeros(1))
@@ -205,7 +210,6 @@ if __name__ == '__main__':
     test_over_mnist(model=model,
                     data_dir=DATA_DIR, 
                     task=task, 
-                    flatten=flatten, 
-                    channel_dim=channel_dim, 
+                    transform=custom_transform,
                     training_kwargs=training_kwargs,  # optional
-                    custom_pen=custom_l1_act_penalty)  # optional
+                    training_penalty=custom_l1_act_penalty)  # optional
