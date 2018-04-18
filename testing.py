@@ -23,6 +23,7 @@ def test_over_mnist(model,
                     task, 
                     training_kwargs={},
                     transform=ToTensor(),
+                    data_seed=None,
                     training_penalty=None):
     """quickly train a model over mnist
     Args:
@@ -43,14 +44,16 @@ def test_over_mnist(model,
     # n_train = training_kwargs.get('n_train', -1)
     # n_test = training_kwargs.get('n_test', -1)
 
-    datasets = quick_mnist(data_dir, transform=transform)
-    train_data_loader = DataLoader(datasets['train'], 
-                                   batch_size=batch_size, 
-                                   shuffle=True)
+    P_SPLITS = {'train': 1.}
+    BALANCED = True
 
-    test_data_loader = DataLoader(datasets['test'], 
-                                  batch_size=batch_size, 
-                                  shuffle=False)
+    data_loaders = quick_mnist(data_dir, 
+                               batch_size, 
+                               transform=transform, 
+                               balanced=BALANCED,
+                               seed=data_seed, 
+                               p_splits=P_SPLITS)
+    train_data_loader, test_data_loader = data_loaders['train'], data_loaders['test']
 
     loss_fn = TASK_LOSS_FNS[task]()
     if CUDA:
@@ -119,14 +122,19 @@ def test_over_mnist(model,
         acc = mean(accs)
         print('({:s} step {:d}) acc: {:.3f}, loss: {:.3f}'\
                 .format(split, i_step, acc, loss))
+        return loss, acc
 
     i_step = 0
+    results = {'train': {'loss': {}, 'acc': {}},
+               'test': {'loss': {}, 'acc': {}}}
+    rtrain, rtest = results['train'], results['test']
     for i_epoch in range(n_epoch):
-        evaluate(train_data_loader, 'train', i_step)
-        evaluate(test_data_loader, 'test', i_step)
+        rtrain['loss'][i_epoch], rtrain['acc'][i_epoch] = evaluate(train_data_loader, 'train', i_step)
+        rtest['loss'][i_epoch], rtest['acc'][i_epoch] = evaluate(test_data_loader, 'test', i_step)
         for xs, ys in train_data_loader:
             step(xs, ys, i_step=i_step)
             i_step += 1
+    return model, results, data_loaders
 
 
 def _flatten(im):
@@ -136,23 +144,63 @@ def _flatten(im):
 def _channel_dim(im):
     return im.unsqueeze(0)
 
+from torch.utils.data.sampler import SubsetRandomSampler
+from torch.utils.data import TensorDataset
 
 # TODO (maybe): add a few common transforms as string options
 # QUICK_TRANSFORMS = {'flatten': _flatten, 'channel_dim': channel_dim}
 
-def quick_mnist(data_dir, transform=ToTensor()):
+from numbers import Number
+from pyt.training import split_inds
+
+def quick_mnist(data_dir, 
+                batch_size, 
+                transform=ToTensor(), 
+                p_splits=None, 
+                balanced=False, 
+                seed=None,
+                num_workers=0,
+                pin_memory=False):
     os.makedirs(data_dir, exist_ok=True)
     download = not (os.path.exists(os.path.join(data_dir, 'processed', 'training.pt'))
                     and os.path.exists(os.path.join(data_dir, 'processed', 'test.pt')))
-    dataset = MNIST(data_dir, 
+
+    train_dataset = MNIST(data_dir, 
                     download=download,
                     transform=transform,
                     train=True)
+
     test_dataset = MNIST(data_dir, 
-                         download=False, 
-                         transform=transform, 
-                         train=False)
-    return {'train': dataset, 'test': test_dataset}
+                    download=False,
+                    transform=transform,
+                    train=False)
+
+    if isinstance(p_splits, Number):
+        p_splits = {'train': p_splits, 'val': 1. - splits}
+    elif p_splits is None:
+        p_splits = {'train': 1.}
+
+    sinds = split_inds(len(train_dataset), 
+                         p_splits, 
+                         balanced=balanced, 
+                         labels=train_dataset.train_labels.numpy().astype(int),
+                         seed=seed)
+
+    samplers = {split: SubsetRandomSampler(inds) 
+                for split, inds in sinds.items()}
+
+    data_loaders = {split: DataLoader(train_dataset,
+                                     batch_size=batch_size,
+                                     sampler=sam,
+                                     num_workers=num_workers,
+                                     pin_memory=pin_memory)
+                    for split, sam in samplers.items()}
+    data_loaders['test'] = DataLoader(test_dataset,
+                                      batch_size=batch_size,
+                                      shuffle=False,
+                                      num_workers=num_workers,
+                                      pin_memory=pin_memory)
+    return data_loaders
 
 
 if __name__ == '__main__':
@@ -207,9 +255,9 @@ if __name__ == '__main__':
 
 
     # that's it!
-    test_over_mnist(model=model,
-                    data_dir=DATA_DIR, 
-                    task=task, 
-                    transform=custom_transform,
-                    training_kwargs=training_kwargs,  # optional
-                    training_penalty=custom_l1_act_penalty)  # optional
+    model, results, data_loaders = test_over_mnist(model=model,
+                                                   data_dir=DATA_DIR, 
+                                                   task=task, 
+                                                   transform=custom_transform,
+                                                   training_kwargs=training_kwargs,  # optional
+                                                   training_penalty=custom_l1_act_penalty)  # optional
