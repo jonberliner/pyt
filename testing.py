@@ -1,15 +1,17 @@
+from torch import is_tensor
 from torch.utils.data import DataLoader
 from torchvision.datasets import MNIST
+import torchvision.datasets as tvdatasets
 from torchvision import transforms
 from torch import nn
 from torch.autograd import Variable
 from torch.optim import Adam
 from numpy import mean
+from numpy import array as npa
 import os
 from torchvision.transforms import ToTensor
 
 from pyt.util import CUDA, var_to_numpy
-
 
 TASK_LOSS_FNS = {'autoencode': nn.BCEWithLogitsLoss,
                  'classify': nn.CrossEntropyLoss,
@@ -18,16 +20,21 @@ TASK_LOSS_FNS = {'autoencode': nn.BCEWithLogitsLoss,
 TASKS = list(TASK_LOSS_FNS.keys())
 
 
-def test_over_mnist(model, 
-                    data_dir, 
-                    task, 
-                    training_kwargs={},
-                    transform=ToTensor(),
-                    data_seed=None,
-                    training_penalty=None):
+def test_over_dataset(model, 
+                      dataset,
+                      data_dir, 
+                      task, 
+                      training_kwargs={},
+                      transform=ToTensor(),
+                      data_seed=None,
+                      training_penalty=None,
+                      p_splits={'train': 0.8, 'val': 0.2},
+                      balanced=True,
+                      include_test_data_loader=True):
     """quickly train a model over mnist
     Args:
         model (nn.Module): pytorch model to optimize
+        dataset (str): torchvision dataset to train over
         data_dir (str): path to data_dir to (possibly download and) find mnist data
         task (str): type of mnist task.  must be in {:s}
         flatten (bool): flatten data (bs x 784) or not? (bs x 28 x 28)
@@ -35,7 +42,7 @@ def test_over_mnist(model,
         training_kwargs (dict; optional): kwargs for training
         custom_pen (nn.Module; optional): takes in custom penalties.
             takes in model, inputs, and outputs (all optional))"""
-    assert task in TASKS, f'task must be in {str(tasks)}'
+    assert task in TASKS, f'task must be in {str(TASKS)}'
     n_epoch = training_kwargs.get('n_epoch', 10)
     batch_size = training_kwargs.get('batch_size', 64)
     lr = training_kwargs.get('lr', 1e-3)
@@ -44,16 +51,16 @@ def test_over_mnist(model,
     # n_train = training_kwargs.get('n_train', -1)
     # n_test = training_kwargs.get('n_test', -1)
 
-    P_SPLITS = {'train': 1.}
-    BALANCED = True
+    data_loaders = quick_dataset(dataset,
+                                 data_dir, 
+                                 batch_size, 
+                                 transform=transform, 
+                                 balanced=balanced,
+                                 seed=data_seed, 
+                                 p_splits=p_splits,
+                                 include_test_data_loader=include_test_data_loader)
 
-    data_loaders = quick_mnist(data_dir, 
-                               batch_size, 
-                               transform=transform, 
-                               balanced=BALANCED,
-                               seed=data_seed, 
-                               p_splits=P_SPLITS)
-    train_data_loader, test_data_loader = data_loaders['train'], data_loaders['test']
+    # train_data_loader, test_data_loader = data_loaders['train'], data_loaders['test']
 
     loss_fn = TASK_LOSS_FNS[task]()
     if CUDA:
@@ -78,6 +85,9 @@ def test_over_mnist(model,
         opt.zero_grad()
         yhl = model(xs)
         loss = loss_fn(yhl, ys)
+        if task == 'classify':
+            _, yhat = yhl.max(1)
+            acc = (ys == yhat).float().mean().data.numpy()[0]
 
         train_loss = loss
         if training_penalty:
@@ -89,23 +99,28 @@ def test_over_mnist(model,
         loss = var_to_numpy(loss)[0]
         train_loss = var_to_numpy(train_loss)[0]
         if i_step is not None:
-            print('(step {:d}) loss: {:.3f}, train_loss: {:.3f}'\
-                  .format(i_step, loss, train_loss), end='\r')
-
+            message = '(step {:d}) loss: {:.3f}, train_loss: {:.3f}'\
+                      .format(i_step, loss, train_loss)
+            if task == 'classify':
+                message = message + ' acc: {:.3f}'.format(acc)
+            print(message, end='\r')
 
     def evaluate(data_loader, split, i_step):
         nsam = 0
         model.eval()
         losses, accs = [], []
+        n_batch = len(data_loader)
         for i_batch, xy in enumerate(data_loader):
             xs, ys = xy
             nsam += xs.shape[0]
+            print(f'testing split {split} (batch {i_batch} of {n_batch})', end='\r')
 
             xs = Variable(xs, requires_grad=False)
             ys = Variable(ys, requires_grad=False)
             if CUDA:
                 xs, ys = xs.cuda(), ys.cuda()
 
+            # import pdb; pdb.set_trace()
             yhl = model(xs)
             loss = var_to_numpy(loss_fn(yhl, ys))
 
@@ -125,13 +140,12 @@ def test_over_mnist(model,
         return loss, acc
 
     i_step = 0
-    results = {'train': {'loss': {}, 'acc': {}},
-               'test': {'loss': {}, 'acc': {}}}
-    rtrain, rtest = results['train'], results['test']
+    results = {split: {'loss': {}, 'acc': {}} for split in data_loaders}
     for i_epoch in range(n_epoch):
-        rtrain['loss'][i_epoch], rtrain['acc'][i_epoch] = evaluate(train_data_loader, 'train', i_step)
-        rtest['loss'][i_epoch], rtest['acc'][i_epoch] = evaluate(test_data_loader, 'test', i_step)
-        for xs, ys in train_data_loader:
+        for split_name, split_res in results.items():
+            split_res['loss'][i_epoch] = evaluate(data_loaders[split_name], split_name, i_step)
+
+        for xs, ys in data_loaders['train']:
             step(xs, ys, i_step=i_step)
             i_step += 1
     return model, results, data_loaders
@@ -153,53 +167,74 @@ from torch.utils.data import TensorDataset
 from numbers import Number
 from pyt.training import split_inds
 
-def quick_mnist(data_dir, 
-                batch_size, 
-                transform=ToTensor(), 
-                p_splits=None, 
-                balanced=False, 
-                seed=None,
-                num_workers=0,
-                pin_memory=False):
+# def quick_mnist(data_dir, 
+DATASETS = ['SVHN', 'FashionMNIST', 'MNIST', 'CIFAR10', 'CIFAR100']
+lower_DATASETS = [ds.lower() for ds in DATASETS]
+
+def quick_dataset(dataset_name,
+                  data_dir, 
+                  batch_size=32, 
+                  transform=ToTensor(), 
+                  p_splits=None, 
+                  balanced=False, 
+                  seed=None,
+                  num_workers=0,
+                  pin_memory=False,
+                  include_test_data_loader=True):
+    try:
+        index_ds = lower_DATASETS.index(dataset_name.lower())
+    except:
+        raise ValueError(f'{dataset_name.lower()} not in {lower_DATASETS}')
+    dataset_name = DATASETS[index_ds]
+    dataset = getattr(tvdatasets, dataset_name)
+
+    data_dir = os.path.join(data_dir, dataset_name)
     os.makedirs(data_dir, exist_ok=True)
     download = not (os.path.exists(os.path.join(data_dir, 'processed', 'training.pt'))
                     and os.path.exists(os.path.join(data_dir, 'processed', 'test.pt')))
 
-    train_dataset = MNIST(data_dir, 
-                    download=download,
-                    transform=transform,
-                    train=True)
-
-    test_dataset = MNIST(data_dir, 
-                    download=False,
-                    transform=transform,
-                    train=False)
+    train_dataset = dataset(data_dir, 
+                            download=download,
+                            transform=transform,
+                            train=True)
 
     if isinstance(p_splits, Number):
         p_splits = {'train': p_splits, 'val': 1. - splits}
     elif p_splits is None:
         p_splits = {'train': 1.}
 
+    labels = train_dataset.train_labels
+    if is_tensor(labels):
+        labels = labels.numpy().astype(int)
+    elif type(labels) is list:
+        labels = npa(labels).astype(int)
+
     sinds = split_inds(len(train_dataset), 
-                         p_splits, 
-                         balanced=balanced, 
-                         labels=train_dataset.train_labels.numpy().astype(int),
-                         seed=seed)
+                       p_splits, 
+                       balanced=balanced, 
+                       labels=labels,
+                       seed=seed)
 
     samplers = {split: SubsetRandomSampler(inds) 
                 for split, inds in sinds.items()}
 
     data_loaders = {split: DataLoader(train_dataset,
-                                     batch_size=batch_size,
-                                     sampler=sam,
-                                     num_workers=num_workers,
-                                     pin_memory=pin_memory)
-                    for split, sam in samplers.items()}
-    data_loaders['test'] = DataLoader(test_dataset,
                                       batch_size=batch_size,
-                                      shuffle=False,
+                                      sampler=sam,
                                       num_workers=num_workers,
                                       pin_memory=pin_memory)
+                    for split, sam in samplers.items()}
+
+    if include_test_data_loader:
+        test_dataset = dataset(data_dir, 
+                            download=False,
+                            transform=transform,
+                            train=False)
+        data_loaders['test'] = DataLoader(test_dataset,
+                                        batch_size=batch_size,
+                                        shuffle=False,
+                                        num_workers=num_workers,
+                                        pin_memory=pin_memory)
     return data_loaders
 
 
@@ -211,8 +246,9 @@ if __name__ == '__main__':
 
     # example use case
 
-    # mnist path
-    DATA_DIR = os.path.join(os.getenv('HOME'), 'datasets', 'mnist')
+    # datasets directory path
+    DATA_DIR = os.path.join(os.getenv('HOME'), 'datasets')
+    DATASET = 'MNIST'  # will be in $DATA_DIR/$DATASET
 
     # build mnist-compatible model
     model = MLP(784, 10, [128]*3, act_fn=Swish())
@@ -255,9 +291,10 @@ if __name__ == '__main__':
 
 
     # that's it!
-    model, results, data_loaders = test_over_mnist(model=model,
-                                                   data_dir=DATA_DIR, 
-                                                   task=task, 
-                                                   transform=custom_transform,
-                                                   training_kwargs=training_kwargs,  # optional
-                                                   training_penalty=custom_l1_act_penalty)  # optional
+    model, results, data_loaders = test_over_dataset(model=model,
+                                                     dataset=DATASET,
+                                                     data_dir=DATA_DIR, 
+                                                     task=task, 
+                                                     transform=custom_transform,
+                                                     training_kwargs=training_kwargs,  # optional
+                                                     training_penalty=custom_l1_act_penalty)  # optional
