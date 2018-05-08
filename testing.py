@@ -239,7 +239,7 @@ def quick_dataset(dataset_name,
 
 
 if __name__ == '__main__':
-    from pyt.core_modules import MLP, Identity, Swish
+    from pyt.modules import MLP, Identity, Swish
     from pyt.util import vlt, var_to_numpy
     import os
     import torch
