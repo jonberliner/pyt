@@ -21,7 +21,7 @@ def split_inds(inds, p_splits, balanced=False, labels=None, seed=None):
         p_splits = {'train': 1.}
 
     ps = np.array(list(p_splits.values()))
-    assert ((ps > 0.) and (ps <= 1.)).all(), 'all p_splits passed must be in (0., 1.]'
+    assert (ps > 0.).all() and (ps <= 1.).all(), 'all p_splits passed must be in (0., 1.]'
     assert ps.sum() <= 1., 'all p_splits must sum to <= 1.'
 
     if balanced:
@@ -46,7 +46,7 @@ def split_inds(inds, p_splits, balanced=False, labels=None, seed=None):
         split_inds = {split: None for split in p_splits}
         i_start = 0
         for split, p_split in p_splits.items():
-            n_split = min(int(p_split * num_inds), 1)  # no empty splits
+            n_split = max(int(p_split * num_inds), 1)  # no empty splits
             i_end = i_start + n_split
             split_inds[split] = shuffled_inds[i_start:i_end]
             i_start = i_end
