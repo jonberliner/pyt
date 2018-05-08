@@ -87,6 +87,14 @@ class Identity(nn.Module):
         return xs
 
 
+def try_to_cuda(fn):
+    def wrapper(*args, **kwargs):
+        output = fn(*args, **kwargs)
+        if torch.cuda.is_available():
+            output = output.cuda()
+        return output
+    return wrapper
+
 norm_fns = {
     'None': Identity,
     'batch': nn.BatchNorm1d,
@@ -116,7 +124,10 @@ class MLP(SizedModule):
         # self.dim_output = dim_output
         self.dim_hidden = dim_hidden
         self.act_fn = act_fn
-        self.norm_fn = norm_fns[str(norm)]
+        if norm is None or isinstance(norm, str):
+            self.norm_fn = norm_fns[str(norm)]
+        else:
+            self.norm_fn = norm
         self.p_drop = p_drop
         self.dropout_kind = dropout_kind
         self.drop_fn = drop_fns[str(dropout_kind)]
@@ -160,6 +171,45 @@ class SNMLP(MLP):
                          norm=None,
                          dropout_kind='alpha',
                          p_drop=p_drop)
+
+
+class ConvEncoder(nn.Module):
+    def __init__(self, 
+                 dim_input, 
+                 dim_output, 
+                 dim_hidden=[], 
+                 act_fn=Swish(), 
+                 norm_fn=Identity,
+                 separable=False):
+        super().__init__()
+        self.dim_input = dim_input
+        self.dim_output = dim_output
+        self.dim_hidden = dim_hidden
+
+        dim_in = self.dim_input
+        self.n_hid = len(self.dim_hidden)
+        self.net = nn.Sequential()
+        for hi, dim_out in enumerate(self.dim_hidden):
+            sep = separable and hi > 0
+            self.net.add_module(f'conv_{hi}', ConvLayer(dim_in, dim_out, (3, 3), 
+                                                        padding=1, separable=sep,
+                                                        act_fn=act_fn, norm_fn=norm_fn))
+            self.net.add_module(f'downsample{hi}', nn.Conv2d(dim_out, dim_out, (3, 3), stride=2, padding=1))
+            dim_in = dim_out
+        dim_in = dim_out
+        self.net.add_module('readout', nn.Conv1d(dim_in, self.dim_output))
+
+        self.max_or_mean_logits = nn.Parameter(torch.randn(self.dim_output))
+
+    def forward(inputs):
+        vinputs = Variable(inputs)
+        logits = self.net(vinputs)
+        batch_size, ch_out = logits.shape[:2]
+        maxes = logits.view(batch_size, ch_out, -1).max(-1)
+        means = logits.view(batch_size, ch_out, -1).mean(-1)
+        w_maxormean = F.sigmoid(self.max_or_mean_logits).view(1, -1)
+        pooled = (w_maxormean * maxes) + ((1. - w_maxormean) * means)  # bs x chout
+        return pooled
 
 
 if __name__ == '__main__':
@@ -254,3 +304,5 @@ if __name__ == '__main__':
         for xs, ys in data_loader:
             step(xs, ys, i_step=i_step)
             i_step += 1
+
+
