@@ -5,6 +5,19 @@ import os
 
 CUDA = torch.cuda.is_available()
 
+# # TODO: decide if want to move forward with decorators or keep nested functions
+# def cuda_if_available(fn):
+#     def wrapper(*args, **kwargs):
+#         output = fn(*args, **kwargs)
+#         if CUDA:
+#             output = output.cuda()
+#         return output
+#     return wrapper
+
+# @cuda_if_available
+# def dt(array):
+#     return torch.DoubleTensor(array)
+
 
 def cuda_if_available(tensor):
     tensor = tensor.cuda() if CUDA else tensor
