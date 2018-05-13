@@ -1,7 +1,6 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-from torch.autograd import Variable
 
 from pyt.dropout import GaussianDropout
 from pyt.normalization import GroupNorm
@@ -30,7 +29,7 @@ class ReadInReadOutModule(SizedModule):
         Args:
             dim_input (int): input size
             dim_output (int): output size
-            hidden_encoder (nn.Modules): model that takes in linear readin.  
+            hidden_encoder (nn.Modules): model that takes in linear readin.
                 it's output is passed to a linear readout.
         """
         assert dim_input
@@ -66,16 +65,11 @@ class Swish(SizedModule):
         _beta_logit = torch.ones(_dim_input) * 0.5412  # softplus ~= 1.
         if trainable:
             assert self.dim_input is not None
-            self.beta_logit = nn.Parameter(_beta_logit,
-                                           requires_grad=True)
-        else:
-            self.register_buffer('beta_logit', _beta_logit)
+        self.beta_logit = nn.Parameter(_beta_logit,
+                                       requires_grad=self.trainable)
 
     def forward(self, xs):
-        beta_logit = self.beta_logit
-        if not self.trainable:
-            beta_logit = Variable(beta_logit)
-        beta = F.softplus(beta_logit)
+        beta = F.softplus(self.beta_logit)
         return xs * F.sigmoid(beta * xs)
 
 
@@ -87,19 +81,12 @@ class Identity(nn.Module):
         return xs
 
 
-def try_to_cuda(fn):
-    def wrapper(*args, **kwargs):
-        output = fn(*args, **kwargs)
-        if torch.cuda.is_available():
-            output = output.cuda()
-        return output
-    return wrapper
-
 norm_fns = {
     'None': Identity,
     'batch': nn.BatchNorm1d,
     'group': GroupNorm
 }
+
 
 drop_fns = {
     'None': Identity,
@@ -109,7 +96,6 @@ drop_fns = {
 }
 
 
-# %%
 class MLP(SizedModule):
     def __init__(self,
                  dim_input,
@@ -120,8 +106,6 @@ class MLP(SizedModule):
                  dropout_kind=None,
                  norm=None):
         super().__init__(dim_input, dim_output)
-        # self.dim_input = dim_input
-        # self.dim_output = dim_output
         self.dim_hidden = dim_hidden
         self.act_fn = act_fn
         if norm is None or isinstance(norm, str):
@@ -147,7 +131,6 @@ class MLP(SizedModule):
             _droppeds.append(dropped)
 
             dim_in = dim_out
-        nlayer = len(dim_hidden) + 1
         self.readout = nn.Linear(dim_in, dim_output)
 
         self.linear = nn.ModuleList(_linears)
@@ -173,43 +156,43 @@ class SNMLP(MLP):
                          p_drop=p_drop)
 
 
-class ConvEncoder(nn.Module):
-    def __init__(self, 
-                 dim_input, 
-                 dim_output, 
-                 dim_hidden=[], 
-                 act_fn=Swish(), 
-                 norm_fn=Identity,
-                 separable=False):
-        super().__init__()
-        self.dim_input = dim_input
-        self.dim_output = dim_output
-        self.dim_hidden = dim_hidden
+# class ConvEncoder(nn.Module):
+#     def __init__(self,
+#                  dim_input,
+#                  dim_output,
+#                  dim_hidden=[],
+#                  act_fn=Swish(),
+#                  norm_fn=Identity,
+#                  separable=False):
+#         super().__init__()
+#         self.dim_input = dim_input
+#         self.dim_output = dim_output
+#         self.dim_hidden = dim_hidden
 
-        dim_in = self.dim_input
-        self.n_hid = len(self.dim_hidden)
-        self.net = nn.Sequential()
-        for hi, dim_out in enumerate(self.dim_hidden):
-            sep = separable and hi > 0
-            self.net.add_module(f'conv_{hi}', ConvLayer(dim_in, dim_out, (3, 3), 
-                                                        padding=1, separable=sep,
-                                                        act_fn=act_fn, norm_fn=norm_fn))
-            self.net.add_module(f'downsample{hi}', nn.Conv2d(dim_out, dim_out, (3, 3), stride=2, padding=1))
-            dim_in = dim_out
-        dim_in = dim_out
-        self.net.add_module('readout', nn.Conv1d(dim_in, self.dim_output))
+#         dim_in = self.dim_input
+#         self.n_hid = len(self.dim_hidden)
+#         self.net = nn.Sequential()
+#         for hi, dim_out in enumerate(self.dim_hidden):
+#             sep = separable and hi > 0
+#             self.net.add_module(f'conv_{hi}', ConvLayer(dim_in, dim_out, (3, 3),
+#                                                         padding=1, separable=sep,
+#                                                         act_fn=act_fn, norm_fn=norm_fn))
+#             self.net.add_module(f'downsample{hi}', nn.Conv2d(dim_out, dim_out, (3, 3), stride=2, padding=1))
+#             dim_in = dim_out
+#         dim_in = dim_out
+#         self.net.add_module('readout', nn.Conv1d(dim_in, self.dim_output))
 
-        self.max_or_mean_logits = nn.Parameter(torch.randn(self.dim_output))
+#         self.max_or_mean_logits = nn.Parameter(torch.randn(self.dim_output))
 
-    def forward(inputs):
-        vinputs = Variable(inputs)
-        logits = self.net(vinputs)
-        batch_size, ch_out = logits.shape[:2]
-        maxes = logits.view(batch_size, ch_out, -1).max(-1)
-        means = logits.view(batch_size, ch_out, -1).mean(-1)
-        w_maxormean = F.sigmoid(self.max_or_mean_logits).view(1, -1)
-        pooled = (w_maxormean * maxes) + ((1. - w_maxormean) * means)  # bs x chout
-        return pooled
+#     def forward(inputs):
+#         vinputs = Variable(inputs)
+#         logits = self.net(vinputs)
+#         batch_size, ch_out = logits.shape[:2]
+#         maxes = logits.view(batch_size, ch_out, -1).max(-1)
+#         means = logits.view(batch_size, ch_out, -1).mean(-1)
+#         w_maxormean = F.sigmoid(self.max_or_mean_logits).view(1, -1)
+#         pooled = (w_maxormean * maxes) + ((1. - w_maxormean) * means)  # bs x chout
+#         return pooled
 
 
 if __name__ == '__main__':
@@ -230,20 +213,20 @@ if __name__ == '__main__':
         out = out.view(784).float()
         return out
 
-    dataset = MNIST(DATA_DIR, 
-                    download=True, 
+    dataset = MNIST(DATA_DIR,
+                    download=True,
                     transform=transform_mnist,
                     train=True)
-    data_loader = DataLoader(dataset, 
-                             batch_size=64, 
+    data_loader = DataLoader(dataset,
+                             batch_size=64,
                              shuffle=True)
 
-    test_dataset = MNIST(DATA_DIR, 
-                         download=False, 
-                         transform=transform_mnist, 
+    test_dataset = MNIST(DATA_DIR,
+                         download=False,
+                         transform=transform_mnist,
                          train=False)
-    test_data_loader = DataLoader(test_dataset, 
-                                  batch_size=64, 
+    test_data_loader = DataLoader(test_dataset,
+                                  batch_size=64,
                                   shuffle=False)
 
     model = SNMLP(784, 10, [128]*5)
