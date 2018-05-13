@@ -1,9 +1,9 @@
 import numpy as np
 from numbers import Number
 
+
 def split_inds(inds, p_splits, balanced=False, labels=None, seed=None):
     rng = np.random.RandomState(seed)
-    # assert balanced is False, 'balanced not yes implemented'
 
     if type(inds) == int:
         inds = np.arange(inds)
@@ -15,13 +15,14 @@ def split_inds(inds, p_splits, balanced=False, labels=None, seed=None):
         if p_splits == 1.:
             p_splits = {'train': 1.}
         else:
-            p_splits = {'train': p_splits, 
+            p_splits = {'train': p_splits,
                         'val': 1.-p_splits}
     elif p_splits is None:
         p_splits = {'train': 1.}
 
     ps = np.array(list(p_splits.values()))
-    assert (ps > 0.).all() and (ps <= 1.).all(), 'all p_splits passed must be in (0., 1.]'
+    assert (ps > 0.).all() and (ps <= 1.).all(),\
+        'all p_splits passed must be in (0., 1.]'
     assert ps.sum() <= 1., 'all p_splits must sum to <= 1.'
 
     if balanced:
@@ -34,11 +35,12 @@ def split_inds(inds, p_splits, balanced=False, labels=None, seed=None):
             shuffled_lab_inds = rng.permutation(lab_inds)
             i_start = 0
             for split, p_split in p_splits.items():
-                n_split = max(int(p_split * num_lab_inds), 1)  # no empty splits
+                n_split = max(int(p_split * num_lab_inds),
+                              1)  # no empty splits
                 i_end = i_start + n_split
                 split_inds[split].append(shuffled_lab_inds[i_start:i_end])
                 i_start = i_end
-        split_inds = {split: np.concatenate(sinds, 0) 
+        split_inds = {split: np.concatenate(sinds, 0)
                       for split, sinds in split_inds.items()}
     else:
         num_inds = len(inds)
@@ -55,13 +57,14 @@ def split_inds(inds, p_splits, balanced=False, labels=None, seed=None):
         # # assign dangling to random split
         # if i_start < num_inds:
         #     split = rng.choice(list(split_inds.keys()))
-        #     split_inds[split] = np.concatenate([split_inds[split], 
+        #     split_inds[split] = np.concatenate([split_inds[split],
         #                                          inds[i_start:]], 0)
     return split_inds
 
 
 class Batcher(object):
-    def __init__(self, data, batch_size, drop_last=False, shuffle=True, seed=None):
+    def __init__(self, data, batch_size, drop_last=False, shuffle=True,
+                 seed=None):
         if type(data) == int:
             data = np.arange(data)
         self.seed = seed
@@ -96,7 +99,8 @@ class Batcher(object):
 
         self.curr_pool_inds = (self._i_start, self._i_end)
 
-        # FIXME: this tells you what inds are next, not the ones from the current batch
+        # FIXME: this tells you what inds are next,
+        #        not the ones from the current batch
         self._increment_inds()
         return output
 
@@ -110,6 +114,3 @@ class Batcher(object):
     def _increment_inds(self):
         self._i_start = self._i_end
         self._i_end = min(self._i_end + self.batch_size, self.num_data)
-
-
-
