@@ -1,4 +1,3 @@
-import torch
 from torch import nn
 
 
@@ -14,13 +13,12 @@ class GroupNorm(nn.Module):
 
     def forward(self, xs):
         batch_size = xs.shape[0]
-        grouped_x = xs.view(batch_size, 
-                            self.num_groups, 
+        grouped_x = xs.view(batch_size,
+                            self.num_groups,
                             self.num_channels_per_group)
         output = self.group_bn(grouped_x)
         return output.view(batch_size, -1)
 
-        return self.group_bn(xs.view(-1, 
-                                     self.num_groups, 
+        return self.group_bn(xs.view(-1,
+                                     self.num_groups,
                                      self.num_channels_per_group))
-
