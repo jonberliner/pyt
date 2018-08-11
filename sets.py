@@ -1,6 +1,5 @@
 import torch
 from torch import nn
-# import torch.functional as F
 from torch.distributions import Categorical
 
 sigmoid = torch.sigmoid
@@ -45,62 +44,6 @@ def log_sum_exp(inputs, dim=0, squash=sigmoid, r=1.):
     return expd.mean(dim).log().mul(1. / r)
 
 
-# def mixed_pooling(inputs,
-#                   weights,
-#                   pooling_functions,
-#                   pool_dim,
-#                   stack_dim,
-#                   mixing_dim):
-#     """
-#     apply pooling functions in pooling_functions along pool_dim,
-#     then aggregate weighted for each pooling function along mixing_dim
-#     Args:
-#         inputs (nd tensor): inputs
-#         weights ((n-1)d tensor): should be size of pool(inputs, dim)
-#         pooling_functions ([fn]): functions that reduce inputs
-#             on dim dim with function call form pool(inputs, dim=dim)
-#         pool_dim (int): dim to reduce inputs on
-#         stack_dim (int): dim to stack pooled inputs along
-#         mixing_dim (int): dim to mix pooled outputs over
-#     """
-#     # assert weights.shape[0] == len(pool_fns)
-#     # assert len(inputs) == 3, 'currently only supports 3d input'
-#     # assert len(weights) == 2, 'currently only supports 2d weights'
-#     pooled = torch.stack([pool(inputs, dim) for pool in pooling_functions],
-#                          dim=-1)
-#     return pooled.mul(weights.t()).sum(mixing_dim)
-
-
-# class MixedPooling(nn.Module):
-#     def __init__(self,
-#                  pooling_functions,
-#                  dim,
-#                  initial_weights,
-#                  learnable_weights=True,
-#                  weights_transform=None):
-#         super().__init__()
-#         self.pooling_functions = pooling_functions
-#         self.dim = dim
-#         # assert initial_weights.shape[0] == len(self.pooling_functions)
-#         # assert len(initial_weights.shape) == 2,\
-#         #     'currently only supports n_pooling_functions x dim_input weights'
-#         self.dim_input = initial_weights.shape[1]
-
-#         self.learnable_weights = learnable_weights
-#         self.weights = torch.tensor(initial_weights,
-#                                     requires_grad=self.learnable_weights)
-#         self.weights_transform = weights_transform
-
-#     def forward(self, inputs):
-#         weights = self.weights
-#         if self.weights_transform:
-#             weights = self.weights_transform(self.weights)
-#         return mixed_pooling(inputs=inputs,
-#                              dim=self.dim,
-#                              pooling_function=self.pooling_functions,
-#                              weights=weights)
-
-
 def tile(a, dim, n_tile):
     """tweaked https://discuss.pytorch.org/t/how-to-tile-a-tensor/13853/4"""
     init_dim = a.size(dim)
@@ -131,17 +74,6 @@ def coord_grid(height, width, hscale=None, wscale=None):
     rep_height = tile(ch, 0, width)
     rep_width = cw.repeat(height)
     return torch.stack([rep_height, rep_width], 1)
-
-
-def images_to_sets(images, hscale=[-1., 1.], wscale=[-1., 1.]):
-    """go from NCHW images of set representation of images"""
-    batch_size, num_channels, height, width = images.shape
-    locations = coord_grid(height, width, hscale, wscale)
-
-    observations = images.view(batch_size, num_channels, -1)\
-                         .tranpose(1, 2)\
-                         .contiguous()
-    return (locations, observations)
 
 
 def image_to_set(image, return_locations=False, hscale=None, wscale=None):
@@ -176,7 +108,15 @@ class SetMixedPooling(nn.Module):
                  dim_input=None,
                  learnable_weights=True,
                  weights_transform=None):
-        """expects input of size batch_size x n_obs_per_input x dim_input"""
+        """
+        Takes inputs in expected set-representation format, runs pooling
+        over the observation dimension with functions in pooling_functions,
+        and weights the pooled activations for each dim of dim_input
+        by weights.  The hope is to learn the most useful pooling function
+        per feature.
+
+        expects input of size batch_size x n_obs_per_input x dim_input
+        """
         super().__init__()
 
         if dim_input is None:
@@ -216,17 +156,8 @@ class SetMixedPooling(nn.Module):
         pooled = torch.stack(pooled, -2)
         return pooled.mul(self.weights).sum(-2)
 
-        return mixed_pooling(inputs=inputs,
-                             dim=self.dim,
-                             pooling_function=self.pooling_functions,
-                             weights=weights)
-
-
-_softmax = nn.functional.softmax
-
 
 class SoftmaxSetMixedPooling(SetMixedPooling):
-
     def __init__(self,
                  pooling_functions,
                  initial_weights=None,
@@ -234,7 +165,7 @@ class SoftmaxSetMixedPooling(SetMixedPooling):
                  learnable_weights=True):
 
         def _weight_softmax(weights):
-            return _softmax(weights, 1)
+            return softmax(weights, 1)
 
         super().__init__(pooling_functions=pooling_functions,
                          initial_weights=initial_weights,
@@ -248,45 +179,95 @@ class SoftmaxSetMixedPooling(SetMixedPooling):
         return self.weights_distrs.entropy()
 
 
+class DeepSetSSL(nn.Module):
+    def __init__(self,
+                 obs_encoder,
+                 obs_loc_encoder,
+                 pooling_function,
+                 classifier,
+                 loc_encoder=None,
+                 locs=None):
+        super().__init__()
+        assert (loc_encoder is None) != (locs is None)
+        self.obs_encoder = obs_encoder
+        self.loc_encoder = loc_encoder
+        self.locs = locs
+        self.n_obs = locs.shape[0] if locs is not None else None
+        self.obs_loc_encoder = obs_loc_encoder
+        self.pooling_function = pooling_function
+        self.classifier = classifier
+
+    def forward(self, obs, locs=None):
+        # bs x n_obs x dim_obs
+        bs, n_obs, dim_obs = obs.shape
+        emb_obs = self.obs_encoder(obs.view(-1, dim_obs))
+        if self.loc_encoder is not None:
+            assert locs is not None
+            emb_loc = self.loc_encoder(locs).repeat(bs, 1)
+        else:
+            assert n_obs == self.n_obs
+            emb_loc = self.locs.repeat(bs, 1)
+
+        emb_obs_loc = self.obs_loc_encoder(torch.cat([emb_obs, emb_loc], -1))\
+                          .view(bs, n_obs, -1)
+        hidden = self.pooling_function(emb_obs_loc)
+        return self.classifier(hidden)
+
+
 if __name__ == '__main__':
-    from torch.utils.data import DataLoader
-    from torchvision.datasets import FashionMNIST
-    from torchvision import transforms
-    import os
-    from testing import quick_dataset
+    from torchvision.transforms import ToTensor, Compose
+    from pyt.utils.quick_experiment import quick_experiment
 
-    ##### DATA #####
-    DATA_DIR = '/Users/jsb/datasets/'
-    DOWNLOAD = True
+    # Build Model
+    num_classes = 10
 
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        image_to_set])
-
-    data_loaders = quick_dataset(dataset_name='FashionMNIST',
-                                 data_dir=DATA_DIR,
-                                 batch_size=16,
-                                 transform=transform,
-                                 p_splits={'train': 0.8, 'val': 0.2},
-                                 balanced=True,
-                                 include_test_data_loader=True)
-
-    height, width = data_loaders['train'].dataset.train_data[0].shape
-    locations = coord_grid(height, width, [-1., 1.], [-1., 1.])
-
-
-    ##### MODEL #####
     dim_obs = 1  # greyscale channel
     dim_loc = 2  # x, y
+
+    dim_emb_obs = 32
+    dim_emb_loc = dim_loc
+    dim_emb_obs_loc = 256
+
     obs_encoder = nn.Sequential(
         nn.Linear(dim_obs, 128),
-        nn.ReLU)
-    class DeepSetSSL(nn.Module)
+        nn.BatchNorm1d(128),
+        nn.ReLU(),
+        nn.Linear(128, dim_emb_obs))
 
-    # batcher = iter(data_loaders['train'])
-    # batch_sets, batch_labels = next(batcher)
+    # loc_encoder = nn.Sequential()
+    locs = coord_grid(28, 28, [-1., 1.], [-1., 1.])
+
+    obs_loc_encoder = nn.Sequential(
+        nn.Linear(dim_emb_obs + dim_emb_loc, 128),
+        nn.BatchNorm1d(128),
+        nn.ReLU(),
+        nn.Linear(128, dim_emb_obs_loc))
+
+    classifier = nn.Sequential(
+        nn.Linear(dim_emb_obs_loc, 128),
+        nn.BatchNorm1d(128),
+        nn.ReLU(),
+        nn.Linear(128, num_classes))
 
     pool_fns = [tmax, tmean, isr, log_sum_exp, noisy_or]
-    ssmp = SoftmaxSetMixedPooling(pool_fns, dim_input=1)
+    pooling_function = SoftmaxSetMixedPooling(pooling_functions=pool_fns,
+                                              dim_input=dim_emb_obs_loc)
 
+    model = DeepSetSSL(obs_encoder=obs_encoder,
+                       # loc_encoder=loc_encoder,
+                       locs=locs,
+                       obs_loc_encoder=obs_loc_encoder,
+                       pooling_function=pooling_function,
+                       classifier=classifier)
 
+    set_transform = Compose([ToTensor(), image_to_set])
+
+    quick_experiment(model=model,
+                     dataset='mnist',
+                     data_dir='/Users/jsb/datasets/',
+                     task='classify',
+                     transform=set_transform,
+                     training_kwargs={'lr': 1e-1,
+                                      'batch_size': 32,
+                                      'weight_decay': 1e-5,
+                                      'n_epoch': 6})
