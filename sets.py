@@ -1,8 +1,7 @@
 import torch
 from torch import nn
-import torch.functional as F
+# import torch.functional as F
 from torch.distributions import Categorical
-
 
 sigmoid = torch.sigmoid
 softmax = nn.functional.softmax
@@ -256,6 +255,7 @@ if __name__ == '__main__':
     import os
     from testing import quick_dataset
 
+    ##### DATA #####
     DATA_DIR = '/Users/jsb/datasets/'
     DOWNLOAD = True
 
@@ -267,18 +267,26 @@ if __name__ == '__main__':
                                  data_dir=DATA_DIR,
                                  batch_size=16,
                                  transform=transform,
-                                 p_splits=0.8,
+                                 p_splits={'train': 0.8, 'val': 0.2},
                                  balanced=True,
                                  include_test_data_loader=True)
 
     height, width = data_loaders['train'].dataset.train_data[0].shape
     locations = coord_grid(height, width, [-1., 1.], [-1., 1.])
 
-    batcher = iter(data_loaders['train'])
-    batch_sets, batch_labels = next(batcher)
+
+    ##### MODEL #####
+    dim_obs = 1  # greyscale channel
+    dim_loc = 2  # x, y
+    obs_encoder = nn.Sequential(
+        nn.Linear(dim_obs, 128),
+        nn.ReLU)
+    class DeepSetSSL(nn.Module)
+
+    # batcher = iter(data_loaders['train'])
+    # batch_sets, batch_labels = next(batcher)
 
     pool_fns = [tmax, tmean, isr, log_sum_exp, noisy_or]
-
     ssmp = SoftmaxSetMixedPooling(pool_fns, dim_input=1)
 
 
