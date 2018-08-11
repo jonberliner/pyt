@@ -1,3 +1,8 @@
+"""
+ops and Modules useful for exploring DeepSets, PointNets, DeepSetSSL
+and all these fun variants
+"""
+
 import torch
 from torch import nn
 from torch.distributions import Categorical
@@ -65,6 +70,7 @@ def scale(x, mn, mx):
 
 
 def coord_grid(height, width, hscale=None, wscale=None):
+    """make a 2d coordinate grid, with option to scale coords"""
     ch = torch.arange(height)
     if hscale:
         ch = scale(ch, *hscale)
@@ -133,13 +139,10 @@ class SetMixedPooling(nn.Module):
         self.num_pooling_functions = len(pooling_functions)
         self.pooling_functions = pooling_functions
         self.learnable_weights = learnable_weights
-        self.weights = torch.tensor(initial_weights,
-                                    requires_grad=self.learnable_weights)
+        self.weights = nn.Parameter(torch.tensor(initial_weights,
+                                    requires_grad=self.learnable_weights))
         self.dim_input = initial_weights.shape[1]
 
-        self.learnable_weights = learnable_weights
-        self.weights = torch.tensor(initial_weights,
-                                    requires_grad=self.learnable_weights)
         self.weights_transform = weights_transform
 
     def forward(self, inputs):
@@ -158,6 +161,7 @@ class SetMixedPooling(nn.Module):
 
 
 class SoftmaxSetMixedPooling(SetMixedPooling):
+    # TODO: Doc String
     def __init__(self,
                  pooling_functions,
                  initial_weights=None,
@@ -187,6 +191,7 @@ class DeepSetSSL(nn.Module):
                  classifier,
                  loc_encoder=None,
                  locs=None):
+        # TODO: Doc String
         super().__init__()
         assert (loc_encoder is None) != (locs is None)
         self.obs_encoder = obs_encoder
