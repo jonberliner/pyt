@@ -3,6 +3,7 @@ from numbers import Number
 
 
 def split_inds(inds, p_splits, balanced=False, labels=None, seed=None):
+
     rng = np.random.RandomState(seed)
 
     if type(inds) == int:
@@ -26,20 +27,25 @@ def split_inds(inds, p_splits, balanced=False, labels=None, seed=None):
     assert ps.sum() <= 1., 'all p_splits must sum to <= 1.'
 
     if balanced:
-        split_inds = {split: list() for split in p_splits}
         assert labels is not None
         assert len(labels) == len(inds)
+
+        split_inds = {split: list() for split in p_splits}
         for lab in np.unique(labels):
+            # get label indices
             lab_inds = np.where(labels == lab)[0]
             num_lab_inds = len(lab_inds)
+
+            # assign label inds to splits
             shuffled_lab_inds = rng.permutation(lab_inds)
             i_start = 0
             for split, p_split in p_splits.items():
-                n_split = max(int(p_split * num_lab_inds),
-                              1)  # no empty splits
+                # no empty splits
+                n_split = np.ceil(p_split * num_lab_inds).astype(int)
                 i_end = i_start + n_split
                 split_inds[split].append(shuffled_lab_inds[i_start:i_end])
                 i_start = i_end
+
         split_inds = {split: np.concatenate(sinds, 0)
                       for split, sinds in split_inds.items()}
     else:
@@ -48,7 +54,8 @@ def split_inds(inds, p_splits, balanced=False, labels=None, seed=None):
         split_inds = {split: None for split in p_splits}
         i_start = 0
         for split, p_split in p_splits.items():
-            n_split = max(int(p_split * num_inds), 1)  # no empty splits
+            # no empty splits
+            n_split = np.ceil(p_split * num_inds).astype(int)
             i_end = i_start + n_split
             split_inds[split] = shuffled_inds[i_start:i_end]
             i_start = i_end
