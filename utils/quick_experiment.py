@@ -1,3 +1,4 @@
+import torch
 from torch import nn
 from torch.optim import Adam
 from torchvision.transforms import ToTensor
