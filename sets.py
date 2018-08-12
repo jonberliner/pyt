@@ -71,10 +71,10 @@ def scale(x, mn, mx):
 
 def coord_grid(height, width, hscale=None, wscale=None):
     """make a 2d coordinate grid, with option to scale coords"""
-    ch = torch.arange(height)
+    ch = torch.linspace(0, height-1, height)
     if hscale:
         ch = scale(ch, *hscale)
-    cw = torch.arange(width)
+    cw = torch.linspace(0, width-1, width)
     if wscale:
         cw = scale(cw, *wscale)
     rep_height = tile(ch, 0, width)
