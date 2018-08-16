@@ -5,6 +5,8 @@ from torchvision.transforms import ToTensor
 
 from pyt.utils.quick_data import quick_dataset
 
+use_cuda = torch.cuda.is_available()
+
 TASK_LOSS_FNS = {'autoencode': nn.BCEWithLogitsLoss,
                  'classify': nn.CrossEntropyLoss,
                  'regress': nn.MSELoss}
@@ -22,7 +24,10 @@ def quick_experiment(model,
                      training_penalty=None,
                      p_splits={'train': 0.8, 'val': 0.2},
                      balanced_labels=True,
-                     include_test_data_loader=True):
+                     include_test_data_loader=True,
+                     evaluate_before_training=False,
+                     epochs_per_eval=1,
+                     print_training_loss_every=100):
     """
     quickly train a pytorch model over a dataset in an autoencoding,
     classification, or regression task
@@ -55,7 +60,7 @@ def quick_experiment(model,
                                  p_splits=p_splits,
                                  include_test_data_loader=include_test_data_loader)  # noqa:E501
 
-    device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+    device = 'cuda:0' if use_cuda else 'cpu'
     loss_fn = TASK_LOSS_FNS[task]()
 
     model = model.to(device)
@@ -72,7 +77,7 @@ def quick_experiment(model,
                lr=lr,
                weight_decay=weight_decay)
 
-    def step(xs, ys, i_step=None):
+    def step(xs, ys):
         xs, ys = xs.to(device), ys.to(device)
 
         model.train()
@@ -83,6 +88,8 @@ def quick_experiment(model,
         if task == 'classify':
             _, yhat = yhl.max(1)
             acc = (ys == yhat).float().mean()
+        else:
+            acc = -1
 
         train_loss = loss
         if training_penalty:
@@ -91,18 +98,13 @@ def quick_experiment(model,
 
         train_loss.backward()
         opt.step()
-        if i_step is not None:
-            message = (f'(step {i_step}) loss: {loss.item():.3f}'
-                       f', train_loss: {train_loss.item():.3f}')
-            if task == 'classify':
-                message = message + f', acc: {acc.item():.3f}'
-            print(message, end='\r')
+        return loss.item(), acc.item()
 
-    def evaluate(data_loader, split, i_step):
-        n_sam = 0
+    def evaluate(data_loader, split, i_epoch, i_step):
         model.eval()
-        loss, n_correct = 0., 0.
         n_batch = len(data_loader)
+        loss, n_correct = 0., 0.
+        n_sam = 0
         with torch.no_grad():
             for i_batch, xy in enumerate(data_loader):
                 xs, ys = xy
@@ -112,7 +114,7 @@ def quick_experiment(model,
                 print(f'testing split {split} (batch {i_batch} of {n_batch})',
                       end='\r')
                 yhl = model(xs)
-                loss += (loss_fn(yhl, ys) * batch_size).item()
+                loss += loss_fn(yhl, ys).item() * batch_size
 
                 if task is 'classify':
                     _, yh = yhl.max(1)
@@ -122,100 +124,42 @@ def quick_experiment(model,
 
         loss = loss / n_sam
         acc = n_correct / n_sam
-        print('({:s} step {:d}) acc: {:.3f}, loss: {:.3f}'
-              .format(split, i_step, acc, loss))
+        print('EVAL: (split: {:s}, epoch {:d}, step: {:d}) loss: {:.3f}, acc: {:.3f}'
+              .format(split, i_epoch, i_step, loss, acc))
         return loss, acc
 
     i_step = 0
     results = {split: {'loss': {}, 'acc': {}} for split in data_loaders}
-    for i_epoch in range(n_epoch):
+
+    running_loss, running_acc = None, None
+    if evaluate_before_training:
         for split_name, split_res in results.items():
             split_res['loss'][i_epoch] = evaluate(data_loaders[split_name],
-                                                  split_name,
-                                                  i_step)
-
+                                              split_name,
+                                              i_epoch,
+                                              i_step)
+    for i_epoch in range(n_epoch):
         for xs, ys in data_loaders['train']:
-            step(xs, ys, i_step=i_step)
+            loss, acc = step(xs, ys)
+
+            # update running loss
+            if i_step == 0:
+                running_loss, running_acc = loss, acc
+            else:
+                running_loss = running_loss * 0.99 + loss * 0.01
+                running_acc = running_acc * 0.99 + acc * 0.01
+
+            if i_step % print_training_loss_every == 0:
+                message = f'(step {i_step}) loss: {running_loss:.3f}'
+                if task == 'classify':
+                    message = message + f', acc: {running_acc:.3f}'
+                print(message)
             i_step += 1
+
+        if i_epoch % epochs_per_eval == 0:
+            for split_name, split_res in results.items():
+                split_res['loss'][i_epoch] = evaluate(data_loaders[split_name],
+                                                      split_name,
+                                                      i_epoch,
+                                                      i_step)
     return model, results, data_loaders
-
-
-if __name__ == '__main__':
-    import os
-    import torch
-    from torchvision.transforms import Compose
-
-    # EXAMPLE USE CASE
-
-    # datasets directory path
-    DATA_DIR = os.path.join(os.getenv('HOME'), 'datasets')
-    DATASET = 'MNIST'  # will be in $DATA_DIR/$DATASET
-
-    # build mnist-compatible model
-    class SimpleMNISTMLP(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.l1 = nn.Linear(784, 256)
-            self.b1 = nn.BatchNorm1d(256)
-            self.relu = nn.ReLU()
-            self.l2 = nn.Linear(256, 10)
-
-            self.hidden = None
-
-        def forward(self, inputs):
-            self.hidden = self.relu(self.b1(self.l1(inputs)))
-            return self.l2(self.hidden)
-
-    model = SimpleMNISTMLP()
-
-    # what are we testing? (currently supports 'classify' and 'autoencode')
-    task = 'classify'
-
-    # training kwargs has opt and batching kwargs in it atm
-    # TODO: should these be separated?
-    training_kwargs = {'lr': 1e-2,
-                       'n_epoch': 6,
-                       'batch_size': 128}
-
-    # EXAMPLE OF PASSING CUSTOM DATA TRANSFORM
-    # how would we like to transform the data for our model?
-    # NOTE: not using lambdas so we can serialize
-    custom_transform = Compose([ToTensor(),
-                                lambda im: im.view(-1).float()])
-
-    # EXAMPLE OF QUICKLY ADDING A CUSTOM PENALTY.
-    # penalty can be anything so long as can accept
-    # (and possible ignore) model, inputs, and outputs,
-    # and return a scalar Variable to add to loss
-    # during training
-    def custom_l1_act_penalty(model: nn.Module,
-                              inputs: torch.Tensor,
-                              outputs: torch.Tensor=None) -> torch.Tensor:
-        """add sparisty penalty to all hidden activations"""
-        if model.hidden is None:
-            pen = torch.tensor(0.)
-        else:
-            pen = model.hidden.norm(1).mean()
-        return pen
-
-    def custom_penalty(model: nn.Module,
-                       inputs: torch.Tensor,
-                       outputs: torch.Tensor=None,
-                       weight: float=1.) -> torch.Tensor:
-        l1_act_pen = custom_l1_act_penalty(model, inputs, outputs)
-        l2 = torch.tensor(0.)
-        for param in model.parameters():
-            l2 += param.norm(2)
-        return l1_act_pen * 1e-4 + l2 * 1e-4
-
-    # that's it!
-    model, results, data_loaders =\
-        quick_experiment(model=model,
-                         task=task,
-                         dataset=DATASET,
-                         data_dir=DATA_DIR,
-                         p_splits={'train': 1.},
-                         include_test_data_loader=True,
-                         transform=custom_transform,
-                         training_kwargs=training_kwargs,  # optional
-                         training_penalty=custom_penalty)  # optional
