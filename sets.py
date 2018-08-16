@@ -30,15 +30,11 @@ def noisy_or(inputs, dim=0, squash=sigmoid):
     return 1. - (1. - x).prod(dim)
 
 
-def _isr_v(inputs, squash=sigmoid):
-    """sub-function of isr (integrated segmentation and recognition) op"""
-    x = squash(inputs)
-    return x / (1. - x)
-
-
 def isr(inputs, dim=0, squash=sigmoid):
     """integrated segmentation and recognition) op"""
-    sum_v = _isr_v(inputs, squash).sum(dim)
+    x = squash(inputs)
+    v = x / (1. - x)
+    sum_v = v.sum(dim)
     return sum_v / (1. + sum_v)
 
 
@@ -71,10 +67,10 @@ def scale(x, mn, mx):
 
 def coord_grid(height, width, hscale=None, wscale=None):
     """make a 2d coordinate grid, with option to scale coords"""
-    ch = torch.linspace(0, height-1, height)
+    ch = torch.arange(height).float()
     if hscale:
         ch = scale(ch, *hscale)
-    cw = torch.linspace(0, width-1, width)
+    cw = torch.arange(width).float()
     if wscale:
         cw = scale(cw, *wscale)
     rep_height = tile(ch, 0, width)
@@ -190,89 +186,153 @@ class DeepSetSSL(nn.Module):
                  pooling_function,
                  classifier,
                  loc_encoder=None,
-                 locs=None):
+                 locs=None,
+                 learnable_locs=False,
+                 p_subsample=1.,
+                 subsample_same_locs=True):
         # TODO: Doc String
         super().__init__()
         assert (loc_encoder is None) != (locs is None)
         self.obs_encoder = obs_encoder
         self.loc_encoder = loc_encoder
-        self.locs = locs
+        self.learnable_locs = learnable_locs
+        self.locs = nn.Parameter(locs, requires_grad=self.learnable_locs)
         self.n_obs = locs.shape[0] if locs is not None else None
         self.obs_loc_encoder = obs_loc_encoder
         self.pooling_function = pooling_function
         self.classifier = classifier
 
+        self.p_subsample = p_subsample
+        self.subsample_same_locs = subsample_same_locs
+
+    def _subsample(self, obs, locs, p_subsample,
+                   subsample_same_locs=True):
+        if p_subsample < 1.:
+            n_all_obs = obs.shape[1]
+            dim_obs = obs.shape[2]
+            n_obs = max(int(n_all_obs * p_subsample), 1)
+
+            if self.subsample_same_locs:
+                # same location subsampling for all datapoints in batch
+                inds = torch.randperm(n_all_obs)[:n_obs]
+                obs = obs.index_select(1, inds.to(obs.device))
+                locs = locs.index_select(0, inds.to(locs.device))
+            else:
+                raise ValueError('not ready yet!')
+                # different subsampling per datapoint in batch
+                inds = torch.stack([torch.randperm(n_all_obs)[:n_obs]
+                                    for _ in range(obs.shape[0])])
+                obs = obs.gather(1, inds.to(obs.device)\
+                                        .unsqueeze(-1)\
+                                        .expand(-1, -1, dim_obs))
+                locs = locs.gather(0, inds.to(locs.device))
+        return obs, locs
+
+
     def forward(self, obs, locs=None):
+        locs = locs or self.locs
+        assert locs is not None
+
+        p_subsample = self.p_subsample if self.training else 1.
+        obs, locs = self._subsample(obs, locs, p_subsample)
+
         # bs x n_obs x dim_obs
         bs, n_obs, dim_obs = obs.shape
         emb_obs = self.obs_encoder(obs.view(-1, dim_obs))
+
         if self.loc_encoder is not None:
-            assert locs is not None
             emb_loc = self.loc_encoder(locs).repeat(bs, 1)
         else:
-            assert n_obs == self.n_obs
-            emb_loc = self.locs.repeat(bs, 1)
+            emb_loc = locs.repeat(bs, 1)
 
         emb_obs_loc = self.obs_loc_encoder(torch.cat([emb_obs, emb_loc], -1))\
                           .view(bs, n_obs, -1)
+
         hidden = self.pooling_function(emb_obs_loc)
+        assert hidden.shape[0] == bs
+        assert hidden.shape[1] == emb_obs_loc.shape[2]
         return self.classifier(hidden)
 
 
 if __name__ == '__main__':
-    from torchvision.transforms import ToTensor, Compose
+    import torch
+    from torch import nn
+    from torchvision.transforms import ToTensor, Compose, Normalize
+    from pyt import sets
     from pyt.utils.quick_experiment import quick_experiment
 
+    use_cuda = torch.cuda.is_available()
+    # torch.device object used throughout this script# torch.devi
+    device = torch.device("cuda" if use_cuda else "cpu")
     # Build Model
     num_classes = 10
 
     dim_obs = 1  # greyscale channel
-    dim_loc = 2  # x, y
+    dim_emb_obs = dim_obs
 
-    dim_emb_obs = 32
-    dim_emb_loc = dim_loc
-    dim_emb_obs_loc = 256
+    # observations will be their identity
+    obs_encoder = nn.Sequential()
 
-    obs_encoder = nn.Sequential(
-        nn.Linear(dim_obs, 128),
-        nn.BatchNorm1d(128),
-        nn.ReLU(),
-        nn.Linear(128, dim_emb_obs))
-
-    # loc_encoder = nn.Sequential()
+    # locs are concat of cartesian and polar coords
     locs = coord_grid(28, 28, [-1., 1.], [-1., 1.])
+    rs = locs.pow(2).sum(1).sqrt().view(-1, 1)
+    thetas = locs[:, 1].div(locs[:, 0]).atan().view(-1, 1)
+    locs = torch.cat([locs, rs, thetas], 1)
 
+    dim_loc = locs.shape[1]
+    dim_emb_loc = dim_loc
+
+    dim_emb_obs_loc = 512
     obs_loc_encoder = nn.Sequential(
         nn.Linear(dim_emb_obs + dim_emb_loc, 128),
-        nn.BatchNorm1d(128),
-        nn.ReLU(),
-        nn.Linear(128, dim_emb_obs_loc))
+        nn.ELU(),
+        nn.Linear(128, 64),
+        nn.ELU(),
+        nn.Linear(64, dim_emb_obs_loc))
+
+    # TODO: let's get the mixtures of perm-invar functions running well
+    #     pool_fns = [sets.tmax,
+    #                 sets.tmean,
+    #                 sets.isr,
+    #                 sets.log_sum_exp,
+    #                 sets.noisy_or]
+    #     pooling_function = sets.SoftmaxSetMixedPooling(
+    #                                 pooling_functions=pool_fns,
+    #                                 dim_input=dim_emb_obs_loc)
+    # pooling_function = lambda x: sets.tmax(x, 1)
+    pooling_function = lambda x: sets.noisy_or(x, 1)
 
     classifier = nn.Sequential(
-        nn.Linear(dim_emb_obs_loc, 128),
-        nn.BatchNorm1d(128),
-        nn.ReLU(),
-        nn.Linear(128, num_classes))
+        # nn.ELU(),
+        nn.Linear(dim_emb_obs_loc, 64),
+        nn.ELU(),
+        nn.Linear(64, 64),
+        nn.ELU(),
+        nn.Linear(64, num_classes))
 
-    pool_fns = [tmax, tmean, isr, log_sum_exp, noisy_or]
-    pooling_function = SoftmaxSetMixedPooling(pooling_functions=pool_fns,
-                                              dim_input=dim_emb_obs_loc)
+    model = sets.DeepSetSSL(obs_encoder=obs_encoder,
+                            # loc_encoder=loc_encoder,
+                            locs=locs,
+                            learnable_locs=False,
+                            obs_loc_encoder=obs_loc_encoder,
+                            pooling_function=pooling_function,
+                            classifier=classifier,
+                            p_subsample=1.,
+                            subsample_same_locs=True).to(device)
 
-    model = DeepSetSSL(obs_encoder=obs_encoder,
-                       # loc_encoder=loc_encoder,
-                       locs=locs,
-                       obs_loc_encoder=obs_loc_encoder,
-                       pooling_function=pooling_function,
-                       classifier=classifier)
+    set_transform = Compose([ToTensor(),
+                             Normalize((0.1307,), (0.3081,)),
+                             sets.image_to_set])
 
-    set_transform = Compose([ToTensor(), image_to_set])
-
+    model.p_subsample = 0.8
     quick_experiment(model=model,
                      dataset='mnist',
                      data_dir='/Users/jsb/datasets/',
+                     p_splits={'train': 1.},
                      task='classify',
                      transform=set_transform,
-                     training_kwargs={'lr': 1e-1,
+                     epochs_per_eval=1,
+                     print_training_loss_every=2,
+                     training_kwargs={'lr': 1e-4,
                                       'batch_size': 32,
-                                      'weight_decay': 1e-5,
-                                      'n_epoch': 6})
+                                      'n_epoch': 100})
