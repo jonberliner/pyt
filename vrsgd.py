@@ -54,11 +54,11 @@ def _sum_a_nb_c(a, b, c):
     return a - b + c
 
 
-def vrsgd(n_epoch,
-          steps_per_epoch,
-          model,
+def vrsgd(model,
           loss_fn,
           data_loader,
+          n_epoch,
+          steps_per_epoch,
           initial_lr=1e-1,
           minimum_lr_divisor=1e-5,
           add_last_step_to_snapshot=True):
